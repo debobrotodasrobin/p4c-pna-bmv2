@@ -98,13 +98,49 @@ This branch adds full PNA (Programmable Network Architecture) feature support to
 
 **Files**: `expression.cpp`, `expression.h`
 
-### 11. `extern void recirculate()` declaration
+### 11. Bound `inout` action parameters (DASH blocker)
+
+**Problem**: DASH-style actions that take the headers/metadata struct as an
+`inout` parameter and are bound at the table (`set_tunnel_mapping(hdr, meta)`)
+are rewritten by the midend into copy-in/copy-out through synthesized
+control-level temporaries (`ethernet_t h_0_u0_ethernet;`). The portable PNA
+path dropped header-/struct-typed variable declarations, so the JSON
+referenced headers that were never registered and bmv2 rejected the config
+("Invalid reference to object of type 'header'"). DASH's PNA build had 52
+such dangling references.
+
+**Fix**: `InspectPnaProgram::preorder(Declaration_Variable)` now registers
+`Type_Header` declarations as header instances and `Type_Struct` declarations
+as metadata instances, mirroring v1model's `HeaderConverter`.
+
+**Files**: `pnaProgramStructure.cpp`
+
+### 12. `extern void recirculate()` declaration
 
 **Problem**: `recirculate` was not declared in `bmv2/pna.p4` (only the `recirculated` metadata field existed).
 
 **Fix**: Added `extern void recirculate();` to the PNA header.
 
 **Files**: `p4include/bmv2/pna.p4`
+
+## DASH (sonic-net/DASH) compatibility
+
+The DASH pipeline (`dash-pipeline/bmv2`, PNA/DPDK variant) now compiles for
+pna_nic and runs:
+
+```bash
+p4c-bm2-pna -I/usr/local/share/p4c/p4include/bmv2 -o dash.json \
+    -DTARGET_DPDK_PNA -DDISABLE_128BIT_ARITHMETIC dash_pipeline.p4
+```
+
+Verified: 116 tables, 176 actions, 84 headers load cleanly on pna_nic; a test
+packet traverses the parser (extracts `u0_ethernet`, `u0_ipv4`), 34 tables,
+and the deparser.
+
+**Not supported in the PNA build**: `-DPNA_CONNTRACK` (uses the `IdleTimeout`
+ageing externs `add_entry`/`set_entry_expire_time` — the one PNA feature not
+implemented, see companion repo docs). DASH's own PNA variant already excludes
+counters, meters and asserts (`dash_arch_specific.p4`).
 
 ## Regression testing
 
