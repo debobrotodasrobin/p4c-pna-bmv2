@@ -21,6 +21,7 @@ limitations under the License.
 #include "backends/bmv2/common/control.h"
 #include "backends/bmv2/common/deparser.h"
 #include "backends/bmv2/common/extern.h"
+#include "backends/bmv2/common/globals.h"
 #include "backends/bmv2/common/header.h"
 #include "backends/bmv2/common/helpers.h"
 #include "backends/bmv2/common/lower.h"
@@ -55,6 +56,27 @@ class PortableCodeGenerator {
     void createExterns();
     void createActions(ConversionContext *ctxt, P4::PortableProgramStructure *structure);
     void createGlobals();
+    /// Converts extern instances that are declared at the top level of the
+    /// program, i.e. outside any parser/control/deparser block.
+    ///
+    /// Such declarations only surface as IR::ExternBlock entries in the
+    /// toplevel block's constantValue map, so they need a dedicated pass. The
+    /// per-block converters (ControlConverter, ParserConverter, ...) only see
+    /// the externs declared inside the block they walk, so without this pass a
+    /// program such as
+    ///
+    ///     Register<bit<32>, bit<4>>(16) pkt_reg;      // global scope
+    ///     ...
+    ///     control c() { apply { pkt_reg.write(...); } }
+    ///
+    /// silently produces an empty "register_arrays" (or "extern_instances",
+    /// "counter_arrays", ...) section while the generated actions keep
+    /// referencing the object. bmv2 then refuses the program at load time with
+    /// "Invalid reference to object of type 'register' with name ...".
+    ///
+    /// This mirrors what the simple_switch backend already does via
+    /// ConvertGlobals.
+    void createGlobals(ConversionContext *ctxt, const bool &emitExterns);
     cstring convertHashAlgorithm(cstring algo);
 };
 

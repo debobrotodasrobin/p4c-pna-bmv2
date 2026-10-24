@@ -107,8 +107,21 @@ struct ActionProfileTraits<Arch::PSA> {
     static const cstring sizeParamName() { return "size"_cs; }
 };
 
+// PNA names its table property "pna_implementation" (see the
+// ValidateTableProperties list in pna_nic/midend.cpp), but inheriting PSA's
+// traits made the lowering look for a property literally named
+// "implementation". The two never matched, so a table written the documented
+// way ("pna_implementation = ap") passed validation yet was never bound to its
+// action profile: the profile was emitted into the JSON orphaned and the table
+// stayed "simple". Naming the property explicitly here is what makes PNA action
+// profiles actually attach.
 template <>
-struct ActionProfileTraits<Arch::PNA> : public ActionProfileTraits<Arch::PSA> {};
+struct ActionProfileTraits<Arch::PNA> {
+    static const cstring name() { return "action profile"_cs; }
+    static const cstring propertyName() { return "pna_implementation"_cs; }
+    static const cstring typeName() { return "ActionProfile"_cs; }
+    static const cstring sizeParamName() { return "size"_cs; }
+};
 
 /// Traits for the action selector extern, must be specialized for v1model and
 /// PSA. Inherits from ActionProfileTraits because of their similarities.
@@ -131,7 +144,10 @@ struct ActionSelectorTraits<Arch::PSA> : public ActionProfileTraits<Arch::PSA> {
 };
 
 template <>
-struct ActionSelectorTraits<Arch::PNA> : public ActionSelectorTraits<Arch::PSA> {};
+struct ActionSelectorTraits<Arch::PNA> : public ActionProfileTraits<Arch::PNA> {
+    static const cstring name() { return "action selector"_cs; }
+    static const cstring typeName() { return "ActionSelector"_cs; }
+};
 
 /// Traits for the register extern, must be specialized for v1model and PSA.
 template <Arch arch>

@@ -615,6 +615,22 @@ extern void mirror_packet(in MirrorSlotId_t mirror_slot_id,
                           in MirrorSessionId_t mirror_session_id);
 // END:mirror_packet
 
+// BEGIN:recirculate
+// recirculate() asks the Network Interface to feed this packet back through
+// the main parser, instead of transmitting it. On that second pass the
+// recirculated field of pna_main_input_metadata is true, which is how a
+// program tells a recirculated packet from a freshly arrived one -- and, in
+// practice, how it avoids recirculating the same packet forever.
+//
+// The packet is deparsed before it is looped back, so the parser sees the
+// frame exactly as it would have appeared on the wire.
+//
+// recirculate() is one of the PNA "forwarding" functions: like drop_packet()
+// and send_to_port() it decides the packet's destination, so the last such
+// call executed is the one that takes effect.
+extern void recirculate();
+// END:recirculate
+
 // TBD: Does it make sense to have a data plane add of a hit action
 // that has in, out, or inout parameters?
 //

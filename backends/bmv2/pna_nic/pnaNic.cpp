@@ -18,10 +18,89 @@ limitations under the License.
 
 #include "frontends/common/model.h"
 #include "frontends/p4/cloner.h"
+#include "frontends/p4/methodInstance.h"
 
 namespace P4::BMV2 {
 
 using namespace P4::literals;
+
+/// Rewrites the PNA SelectByDirection extern function into an ordinary ternary
+/// (IR::Mux), which the bmv2 back end already knows how to lower.
+///
+/// SelectByDirection<T>(is_network_port, from_net_value, from_host_value) is
+/// declared @pure and is defined to be exactly
+///   is_network_port ? from_net_value : from_host_value
+/// (see p4include/bmv2/pna.p4). It is spelled as an extern only so that the
+/// front end leaves it visible to the target back end.
+///
+/// Without this pass the generic value-returning-extern-function lowering in
+/// common/action.cpp treats it like is_host_port()/is_net_port() and emits a
+/// bmv2 primitive literally named "SelectByDirection". No target implements
+/// that primitive, so the program compiles cleanly but the switch rejects the
+/// config at load time with "Unknown primitive action: SelectByDirection".
+///
+/// Lowering to IR::Mux instead reuses existing support:
+/// ExpressionConverter::postorder(const IR::Mux *) already emits bmv2's
+/// {"op": "?"} runtime expression, which the runtime evaluates via the SKIP
+/// opcode machinery (Expression::push_back_ternary_op). Running before
+/// RemoveComplexExpressions means a SelectByDirection used as a table key is
+/// hoisted into its key temporary exactly like any other complex key
+/// expression, and its arguments (e.g. is_net_port(...)) are hoisted first.
+class SelectByDirectionToTernary : public Transform {
+    P4::ReferenceMap *refMap;
+    P4::TypeMap *typeMap;
+
+ public:
+    SelectByDirectionToTernary(P4::ReferenceMap *refMap, P4::TypeMap *typeMap)
+        : refMap(refMap), typeMap(typeMap) {
+        CHECK_NULL(refMap);
+        CHECK_NULL(typeMap);
+        setName("P4::BMV2::SelectByDirectionToTernary");
+    }
+    const IR::Node *postorder(IR::MethodCallExpression *mce) override {
+        auto mi = P4::MethodInstance::resolve(mce, refMap, typeMap);
+        if (mi == nullptr) return mce;
+        auto ef = mi->to<P4::ExternFunction>();
+        if (ef == nullptr || ef->method->name != "SelectByDirection") return mce;
+        auto args = mce->arguments;
+        if (args->size() != 3) {
+            ::P4::error(ErrorType::ERR_INVALID,
+                        "%1%: SelectByDirection expects 3 arguments, got %2%", mce, args->size());
+            return mce;
+        }
+        // arg0 is the direction predicate, arg1 the net-port value, arg2 the
+        // host-port value - matching the @pure reference definition, so the
+        // ternary is (cond ? net : host).
+        auto cond = args->at(0)->expression;
+        auto ifNet = args->at(1)->expression;
+        auto ifHost = args->at(2)->expression;
+        // The call's own type is not always present in the type map at this
+        // point (the generic extern-function lowering in common/action.cpp
+        // reads it with mustExist=false for the same reason), but the two
+        // value operands are always typed and share the result type T.
+        auto resultType = typeMap->getType(ifNet, true);
+        auto mux = new IR::Mux(mce->srcInfo, cond, ifNet, ifHost);
+        typeMap->setType(mux, resultType);
+        return mux;
+    }
+};
+
+/// Builds the value of an inline bmv2 "field_list" parameter.
+///
+/// bmv2 requires that value to be an array of {"type": "field", "value":
+/// [header, field]} objects: P4Objects::process_single_param() iterates it and
+/// rejects (or, worse, asserts on) anything that is not a "field". Converting
+/// the argument directly is wrong for a header- or struct-typed argument,
+/// because that yields the single object {"type": "header", "value": "..."},
+/// which makes bmv2 abort at load time with
+///   "in Json::Value::operator[](char const*)const: requires objectValue"
+/// ConversionContext::addToFieldList() recursively expands struct-likes into
+/// their fields, so it handles headers, structs and field-set literals alike.
+static Util::JsonArray *mkFieldListValue(ConversionContext *ctxt, const IR::Expression *expr) {
+    auto fields = new Util::JsonArray();
+    ctxt->addToFieldList(expr, fields);
+    return fields;
+}
 
 void PnaCodeGenerator::create(ConversionContext *ctxt, P4::PortableProgramStructure *structure) {
     createTypes(ctxt, structure);
@@ -32,7 +111,12 @@ void PnaCodeGenerator::create(ConversionContext *ctxt, P4::PortableProgramStruct
     createActions(ctxt, structure);
     createControls(ctxt, structure);
     createDeparsers(ctxt, structure);
-    createGlobals();
+    // Extern instances declared at global scope (registers, counters, meters,
+    // hashes, ...) are only reachable from the toplevel block, so they need
+    // this pass; the block converters above only see the externs declared
+    // inside the block they walk. emitExterns is true here for consistency
+    // with the ControlConverter instantiation in createControls().
+    createGlobals(ctxt, /*emitExterns=*/true);
 }
 
 void PnaCodeGenerator::createParsers(ConversionContext *ctxt,
@@ -90,6 +174,7 @@ void PnaNicBackend::convert(const IR::ToplevelBlock *tlb) {
         new LowerExpressions(typeMap),
         new PassRepeated({new P4::ConstantFolding(typeMap), new P4::StrengthReduction(typeMap)}),
         new P4::TypeChecking(refMap, typeMap),
+        new SelectByDirectionToTernary(refMap, typeMap),
         new P4::RemoveComplexExpressions(typeMap,
                                          new ProcessControls(&structure.pipeline_controls)),
         new P4::SimplifyControlFlow(typeMap, true),
@@ -156,8 +241,7 @@ Util::IJson *ExternConverter_Hash::convertExternObject(UNUSED ConversionContext 
         auto dst = ctxt->conv->convertLeftValue(mc->arguments->at(0)->expression);
         auto fieldList = new Util::JsonObject();
         fieldList->emplace("type"_cs, "field_list");
-        auto fieldsJson = ctxt->conv->convert(mc->arguments->at(1)->expression, true, false);
-        fieldList->emplace("value"_cs, fieldsJson);
+        fieldList->emplace("value"_cs, mkFieldListValue(ctxt, mc->arguments->at(1)->expression));
         parameters->append(dst);
         parameters->append(fieldList);
     } else {  // get_hash with base and mod
@@ -165,8 +249,7 @@ Util::IJson *ExternConverter_Hash::convertExternObject(UNUSED ConversionContext 
         auto base = ctxt->conv->convert(mc->arguments->at(1)->expression);
         auto fieldList = new Util::JsonObject();
         fieldList->emplace("type"_cs, "field_list");
-        auto fieldsJson = ctxt->conv->convert(mc->arguments->at(2)->expression, true, false);
-        fieldList->emplace("value"_cs, fieldsJson);
+        fieldList->emplace("value"_cs, mkFieldListValue(ctxt, mc->arguments->at(2)->expression));
         auto max = ctxt->conv->convert(mc->arguments->at(3)->expression);
         parameters->append(dst);
         parameters->append(base);
@@ -213,8 +296,7 @@ Util::IJson *ExternConverter_InternetChecksum::convertExternObject(
     if (em->method->name == "add" || em->method->name == "subtract") {
         auto fieldList = new Util::JsonObject();
         fieldList->emplace("type"_cs, "field_list");
-        auto fieldsJson = ctxt->conv->convert(mc->arguments->at(0)->expression, true, false);
-        fieldList->emplace("value"_cs, fieldsJson);
+        fieldList->emplace("value"_cs, mkFieldListValue(ctxt, mc->arguments->at(0)->expression));
         parameters->append(fieldList);
     } else if (em->method->name != "clear") {
         if (mc->arguments->size() == 2) {  // get_verify

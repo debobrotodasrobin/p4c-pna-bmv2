@@ -104,6 +104,23 @@ class ExpressionConverter : public Inspector {
     /// @param convertBool  Wrap the result into a cast from boolean to data (b2d JSON).
     Util::IJson *convert(const IR::Expression *e, bool doFixup = true, bool wrap = true,
                          bool convertBool = false);
+
+    /// Converts \p e for use as the condition of a branch (an if statement or
+    /// a conditional node in a control-flow graph).
+    ///
+    /// bmv2 stores a P4 'bool' in a one-bit data field, so an expression whose
+    /// P4 type is Boolean does not necessarily leave a Boolean on the target's
+    /// expression stack. A bare reference to a Boolean field, for instance,
+    /// compiles to a plain field load, and a field load pushes a *data* temp.
+    /// Expression::eval_bool() unconditionally pops a *bool* temp afterwards,
+    /// so it then reads back() from an empty std::vector and segfaults.
+    ///
+    /// This wraps the condition in a data-to-bool cast exactly when the P4 type
+    /// is Boolean but the compiled form does not already produce a Boolean,
+    /// which keeps the two temp stacks in step. Casts are never added where the
+    /// result is already Boolean, so existing code generation is unchanged.
+    Util::IJson *convertCondition(const IR::Expression *e);
+
     Util::IJson *convertLeftValue(const IR::Expression *e);
     Util::IJson *convertWithConstantWidths(const IR::Expression *e);
     bool isArrayIndexRuntime(const IR::Expression *e);

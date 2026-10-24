@@ -40,7 +40,15 @@ class PnaNicExpressionConverter : public ExpressionConverter {
             auto jsn = new Util::JsonObject();
             jsn->emplace("name"_cs, param->toString());
             jsn->emplace("type"_cs, "hexstr");
-            auto bitwidth = param->type->width_bits();
+            // PNA_CounterType_t is an IR::Type_Enum: PnaEnumOn32Bits deliberately
+            // leaves the enums declared in pna.p4 unconverted, so calling
+            // width_bits() on it aborts the compiler with
+            // "width_bits() on type with unknown size: <Type_Enum>".
+            // The backend's enum representation is 32 bits (see
+            // PnaEnumOn32Bits::enumSize), so use that width explicitly.
+            // ROUNDUP(32, 32) == ROUNDUP(0, 32), so this keeps the emitted JSON
+            // byte-identical to what the psa_switch backend produces.
+            constexpr unsigned bitwidth = 32;
 
             // encode the counter type from enum -> int
             if (fieldName == "BYTES") {

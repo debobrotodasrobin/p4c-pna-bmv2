@@ -119,9 +119,20 @@ Util::IJson *ExternConverter::convertExternFunction(ConversionContext *ctxt,
     auto primitive = mkPrimitive(ef->method->name);
     primitive->emplace_non_null("source_info"_cs, s->sourceInfoJsonObj());
     auto parameters = mkParameters(primitive);
+    // ActionConverter::convertActionBody prepends the destination as argument 0
+    // when lowering a value-returning extern function, so one argument more than
+    // the declared signature means the first argument is a write target. It must
+    // be emitted as a writable reference: converting it as an ordinary value
+    // wraps a Boolean destination in a d2b cast, which bmv2 cannot assign to, so
+    // the result would be silently discarded at runtime.
+    auto declared = ef->method->getParameters()->size();
+    bool destIsArg0 = mc->arguments->size() == declared + 1;
+    bool first = true;
     for (auto arg : *mc->arguments) {
-        auto args = ctxt->conv->convert(arg->expression);
+        auto args = (destIsArg0 && first) ? ctxt->conv->convertLeftValue(arg->expression)
+                                          : ctxt->conv->convert(arg->expression);
         parameters->append(args);
+        first = false;
     }
     return primitive;
 }

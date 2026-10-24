@@ -168,6 +168,21 @@ class ControlConverter : public Inspector {
 
         result->emplace("max_size", size);
         auto ctrs = table->properties->getProperty("counters");
+        // PSA and PNA bind a direct counter through "psa_direct_counter" /
+        // "pna_direct_counter" table properties. bmv2 auto-increments
+        // EntryMeta::counter on every table hit unconditionally; with_counters
+        // only gates the query API (mt_read_counters). No counter_arrays entry
+        // is needed (bmv2 skips is_direct entries in init_counter_arrays, and
+        // the per-entry counter lives in the match unit, not a CounterArray).
+        // Handle PNA/PSA separately to avoid the v1model code path which
+        // populates directCounterMap and emits a counter_arrays entry that
+        // would trip the ["size"] read before the is_direct skip.
+        bool pnaDirectCtr = false;
+        if (ctrs == nullptr) {
+            auto pdc = table->properties->getProperty("pna_direct_counter");
+            if (pdc == nullptr) pdc = table->properties->getProperty("psa_direct_counter");
+            if (pdc != nullptr) pnaDirectCtr = true;
+        }
         if (ctrs != nullptr) {
             // The counters attribute should list the counters of the table, accessed in
             // actions of the table.  We should be checking that this attribute and the
@@ -228,7 +243,7 @@ class ControlConverter : public Inspector {
             }
             result->emplace("with_counters", true);
         } else {
-            result->emplace("with_counters", false);
+            result->emplace("with_counters", pnaDirectCtr);
         }
 
         bool sup_to = false;
@@ -247,7 +262,17 @@ class ControlConverter : public Inspector {
         }
         result->emplace("support_timeout", sup_to);
 
-        auto dm = table->properties->getProperty("meters");
+        // v1model binds a direct meter through the "meters" table property;
+        // PSA and PNA use "psa_direct_meter" / "pna_direct_meter". All three
+        // carry the same information (a reference to a DirectMeter instance)
+        // and all three must populate directMeterMap so that the extern
+        // instance converter can emit the meter_arrays binding. Before this,
+        // only "meters" was read, so a PSA/PNA direct meter reached
+        // convertExternInstance with a null table and aborted the compiler.
+        const IR::Property *dm = table->properties->getProperty("meters");
+        bool dmIsV1 = dm != nullptr;
+        if (dm == nullptr) dm = table->properties->getProperty("pna_direct_meter");
+        if (dm == nullptr) dm = table->properties->getProperty("psa_direct_meter");
         if (dm != nullptr) {
             if (dm->value->is<IR::ExpressionValue>()) {
                 auto expr = dm->value->to<IR::ExpressionValue>()->expression;
@@ -267,11 +292,14 @@ class ControlConverter : public Inspector {
                         return result;
                     }
                     auto te = type->to<IR::Type_Extern>();
-                    if (te->name != "direct_meter") {
+                    // v1model's extern is "direct_meter"; PSA/PNA's is
+                    // "DirectMeter". Accept whichever the property names.
+                    if (te->name != "direct_meter" && te->name != "DirectMeter") {
                         ::P4::error(ErrorType::ERR_UNEXPECTED,
                                     "%1%: Unexpected type %2% for property", dm, type);
                         return result;
                     }
+                    (void)dmIsV1;
                     if (!decl->is<IR::Declaration_Instance>()) {
                         ::P4::error(ErrorType::ERR_EXPECTED, "%1%: expected an instance",
                                     decl->getNode());
@@ -751,7 +779,11 @@ class ControlConverter : public Inspector {
         result->emplace("name", node->name);
         result->emplace("id", nextId("conditionals"_cs));
         result->emplace_non_null("source_info"_cs, node->statement->condition->sourceInfoJsonObj());
-        auto j = ctxt->conv->convert(node->statement->condition, true, false);
+        // convertCondition, not convert: a condition that merely names a
+        // Boolean field compiles to a data-producing field load, and bmv2's
+        // eval_bool() requires a Boolean. See ExpressionConverter::
+        // convertCondition().
+        auto j = ctxt->conv->convertCondition(node->statement->condition);
         CHECK_NULL(j);
         result->emplace("expression"_cs, j);
         for (auto e : node->successors.edges) {
@@ -791,7 +823,8 @@ class ControlConverter : public Inspector {
         auto conditionals = mkArrayField(result, "conditionals"_cs);
         ctxt->action_profiles = action_profiles;
 
-        auto selector_check = new BMV2::SharedActionSelectorCheck<arch>(ctxt);
+        auto selector_check = new BMV2::SharedActionSelectorCheck<arch>(
+            ctxt, Standard::ActionSelectorTraits<arch>::propertyName());
         cont->apply(*selector_check);
 
         std::set<const IR::P4Table *> done;

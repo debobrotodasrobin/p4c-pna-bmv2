@@ -114,7 +114,7 @@ void PortableCodeGenerator::createScalars(ConversionContext *ctxt,
     if (structure->scalars.empty() && structure->scalarMetadataFields.empty()) return;
     // We may have items in scalarMetadataFields but not scalars
     auto name = structure->scalars.empty() ? "scalars"_cs : structure->scalars.begin()->first;
-    ctxt->json->add_header("scalars_t"_cs, name);
+    ctxt->json->add_metadata("scalars_t"_cs, name);
     ctxt->json->add_header_type("scalars_t"_cs);
     unsigned max_length = 0;
     auto add_field = [&](cstring name, const P4::IR::Declaration *decl) {
@@ -216,6 +216,58 @@ void PortableCodeGenerator::createGlobals() {
     // }
 }
 
+namespace {
+
+/// Converts the extern instances that are declared at the top level of the
+/// program, i.e. outside any parser/control/deparser block.
+///
+/// This deliberately does *not* descend into non-extern blocks: the externs
+/// declared inside a parser, control or deparser are already converted while
+/// that block is converted (see ControlConverter / ParserConverter /
+/// DeparserConverter), so walking into them here would emit duplicate JSON
+/// entries. Only the toplevel extern instances are handled.
+///
+/// Without this pass a program that declares, say,
+///
+///     Register<bit<32>, bit<4>>(16) pkt_reg;   // global scope
+///
+/// produces an empty "register_arrays" section while its actions still
+/// reference the register, and bmv2 rejects the program at load time with
+/// "Invalid reference to object of type 'register' with name ...".
+class GlobalExternConverter : public Inspector {
+    ConversionContext *ctxt;
+    const bool &emitExterns;
+
+ public:
+    GlobalExternConverter(ConversionContext *ctxt, const bool &emitExterns)
+        : ctxt(ctxt), emitExterns(emitExterns) {
+        CHECK_NULL(ctxt);
+        setName("GlobalExternConverter");
+    }
+
+    bool preorder(const IR::ToplevelBlock *block) override {
+        // Toplevel blocks are not in the IR tree, so iterate their constant
+        // values explicitly instead of relying on the default traversal.
+        for (auto it : block->constantValue) {
+            auto eb = it.second->to<IR::ExternBlock>();
+            if (eb == nullptr) continue;
+            // The array below is discarded; global action profiles do not
+            // matter here because they are also synthesized from each table
+            // that uses them.
+            ctxt->action_profiles = new Util::JsonArray();
+            ExternConverter::cvtExternInstance(ctxt, eb->node->to<IR::Declaration>(), eb,
+                                               emitExterns);
+        }
+        return false;  // do not descend; nested externs are converted per block
+    }
+};
+
+}  // namespace
+
+void PortableCodeGenerator::createGlobals(ConversionContext *ctxt, const bool &emitExterns) {
+    (void)ctxt->toplevel->apply(GlobalExternConverter(ctxt, emitExterns));
+}
+
 cstring PortableCodeGenerator::convertHashAlgorithm(cstring algo) {
     if (algo == "CRC16") {
         return "crc16"_cs;
@@ -296,23 +348,42 @@ Util::IJson *ExternConverter_Meter::convertExternObject(UNUSED ConversionContext
                                                         UNUSED const IR::MethodCallExpression *mc,
                                                         UNUSED const IR::StatOrDecl *s,
                                                         UNUSED const bool &emitExterns) {
-    if (mc->arguments->size() != 1 && mc->arguments->size() != 2) {
-        modelError("Expected 2 arguments for %1%", mc);
+    // ActionConverter::convertActionBody lowers this value-returning method by
+    // prepending the destination, so the arguments arrive as
+    //   [dest, index]          for execute(index)
+    //   [dest, index, color]   for execute(index, color)
+    // and the destination is emitted last, matching the parameter order of the
+    // target's execute(index, value) / execute_color(pre_color, index, value).
+    //
+    // This used to read the list as though it were the original P4 call, so the
+    // prepended destination was mistaken for the colour operand. For the
+    // one-argument form that accident produced the correct primitive; for the
+    // two-argument form it meant the real colour never reached the target and
+    // colour-aware metering silently ran colour blind.
+    auto n = mc->arguments->size();
+    if (n != 2 && n != 3) {
+        modelError("Expected execute(index) or execute(index, color) for %1%", mc);
         return nullptr;
     }
-    auto primitive = mkPrimitive("_" + em->originalExternType->name + "_" + em->method->name);
+    auto dest = ctxt->conv->convert(mc->arguments->at(0)->expression);
+    auto index = ctxt->conv->convert(mc->arguments->at(1)->expression);
+
+    // The colour-aware form needs a primitive of its own: the target's
+    // Meter.execute() declares no pre-colour parameter, so handing it a fourth
+    // operand would fail config load rather than be quietly ignored.
+    auto primitive = mkPrimitive(n == 3 ? "_Meter_execute_color"_cs : "_Meter_execute"_cs);
     auto parameters = mkParameters(primitive);
     primitive->emplace_non_null("source_info"_cs, s->sourceInfoJsonObj());
     auto mtr = new Util::JsonObject();
     mtr->emplace("type"_cs, "extern");
     mtr->emplace("value"_cs, em->object->controlPlaneName());
     parameters->append(mtr);
-    if (mc->arguments->size() == 2) {
-        auto result = ctxt->conv->convert(mc->arguments->at(1)->expression);
-        parameters->append(result);
+    if (n == 3) {
+        auto color = ctxt->conv->convert(mc->arguments->at(2)->expression);
+        parameters->append(color);
     }
-    auto index = ctxt->conv->convert(mc->arguments->at(0)->expression);
     parameters->append(index);
+    parameters->append(dest);
     return primitive;
 }
 
@@ -320,13 +391,30 @@ Util::IJson *ExternConverter_DirectMeter::convertExternObject(
     UNUSED ConversionContext *ctxt, UNUSED const P4::ExternMethod *em,
     UNUSED const IR::MethodCallExpression *mc, UNUSED const IR::StatOrDecl *s,
     UNUSED const bool &emitExterns) {
-    if (mc->arguments->size() != 1) {
-        modelError("Expected 1 argument for %1%", mc);
+    // PSA/PNA DirectMeter::execute() returns a value, so action.cpp's
+    // value-returning-method rewrite hands us [destination] for execute() or
+    // [destination, pre_color] for execute(color). (v1model's direct_meter has
+    // its own converter and an out-parameter, so it never reaches here.)
+    //
+    // bmv2 runs a direct meter automatically on every table hit and writes the
+    // resulting colour into the destination recorded below, which the instance
+    // converter emits as result_target. No primitive is generated.
+    //
+    // The pre-colour form cannot be honoured: the target has no hook to inject
+    // a colour into the automatic table-hit execution, so it is reported and
+    // ignored rather than silently dropped (the colour would otherwise vanish
+    // with no diagnostic).
+    auto n = mc->arguments->size();
+    if (n < 1 || n > 2) {
+        modelError("Expected execute() or execute(color) for %1%", mc);
         return nullptr;
     }
+    if (n == 2)
+        ::P4::warning(ErrorType::WARN_UNUSED,
+                      "%1%: direct-meter pre-colour is ignored by this target", mc);
     auto dest = mc->arguments->at(0);
     ctxt->structure->directMeterMap.setDestination(em->object, dest->expression);
-    // Do not generate any code for this operation
+    // Do not generate any code for this operation.
     return nullptr;
 }
 

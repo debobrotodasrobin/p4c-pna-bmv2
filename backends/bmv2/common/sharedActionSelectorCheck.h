@@ -42,6 +42,12 @@ class SharedActionSelectorCheck : public Inspector {
     BMV2::ConversionContext *ctxt;
     P4::ReferenceMap *refMap;
     P4::TypeMap *typeMap;
+    // Name of the table property that carries the action profile/selector
+    // implementation. Passed in by the caller because it is architecture
+    // specific ("implementation" for v1model, "pna_implementation" for PNA,
+    // ...); reading it from ActionSelectorTraits here instead trips a
+    // -Wtemplate-body cascade in this template.
+    cstring implPropertyName;
 
     static bool checkSameKeyExpr(const IR::Expression *expr0, const IR::Expression *expr1) {
         if (expr0->node_type_name() != expr1->node_type_name()) return false;
@@ -63,13 +69,19 @@ class SharedActionSelectorCheck : public Inspector {
     }
 
  public:
-    explicit SharedActionSelectorCheck(BMV2::ConversionContext *ctxt) : ctxt(ctxt) {
+    SharedActionSelectorCheck(BMV2::ConversionContext *ctxt, cstring implPropertyName)
+        : ctxt(ctxt), implPropertyName(implPropertyName) {
         refMap = ctxt->refMap;
         typeMap = ctxt->typeMap;
     }
 
     bool preorder(const IR::P4Table *table) override {
-        auto implementation = table->properties->getProperty("implementation");
+        // Architecture-specific property name (see the member comment); a
+        // hard-coded "implementation" here meant PNA/PSA selectors were never
+        // seen, their input key never recorded, and the selector instance was
+        // then dropped as "never referenced by a table", leaving a table of
+        // type indirect_ws pointing at an action_profile that was never emitted.
+        auto implementation = table->properties->getProperty(implPropertyName);
         if (implementation == nullptr) return false;
         if (!implementation->value->is<IR::ExpressionValue>()) {
             ::P4::error(ErrorType::ERR_EXPECTED, "%1%: expected expression for property",

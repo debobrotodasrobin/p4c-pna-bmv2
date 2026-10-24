@@ -68,14 +68,24 @@ void ActionConverter::convertActionBody(const IR::Vector<IR::StatOrDecl> *body,
                     } else if ((em->originalExternType->name.name == "Register" ||
                                 em->method->name.name == "read") ||
                                (em->originalExternType->name.name == "Meter" &&
+                                em->method->name.name == "execute") ||
+                               (em->originalExternType->name.name == "DirectMeter" &&
                                 em->method->name.name == "execute")) {
                         isR = true;
                         // l = l->to<IR::PathExpression>();
                         // BUG_CHECK(l != nullptr, "register_read dest cast failed");
                         auto dest = new IR::Argument(l);
                         auto args = new IR::Vector<IR::Argument>();
-                        args->push_back(dest);                   // dest
-                        args->push_back(mce->arguments->at(0));  // index
+                        args->push_back(dest);  // dest
+                        // Forward every original argument. This used to push
+                        // only the first one, which silently discarded the
+                        // colour operand of Meter::execute(index, color) and
+                        // made colour-aware metering behave exactly like
+                        // colour-blind metering, with no diagnostic. For the
+                        // one-argument cases that reached here before
+                        // (Register::read, Meter::execute) this changes
+                        // nothing.
+                        for (auto a : *mce->arguments) args->push_back(a);
                         mce2 = new IR::MethodCallExpression(mce->method, mce->typeArguments);
                         mce2->arguments = args;
                         s = new IR::MethodCallStatement(mce);
@@ -94,6 +104,33 @@ void ActionConverter::convertActionBody(const IR::Vector<IR::StatOrDecl> *body,
                         } else if (mce->arguments->size() == 1) {
                             args->push_back(mce->arguments->at(0));  // data
                         }
+                        mce2 = new IR::MethodCallExpression(mce->method, mce->typeArguments);
+                        mce2->arguments = args;
+                        s = new IR::MethodCallStatement(mce);
+                    }
+                }
+                // A value-returning extern *function*, such as the PNA port
+                // classification helpers is_host_port() and is_net_port().
+                //
+                // RemoveComplexExpressions has already lifted such a call out of
+                // any enclosing expression and left it behind as
+                // "dest = f(args)", which is the shape handled here. bmv2
+                // primitives are statements that write to a destination rather
+                // than expressions that yield a value, so the destination travels
+                // as argument 0 - the same convention the value-returning extern
+                // methods above rely on.
+                //
+                // Programs that reach this branch previously failed to compile
+                // with "not supported" on this same path, so enabling it cannot
+                // change the output of any program that compiled before.
+                else if (mi->to<P4::ExternFunction>() != nullptr) {
+                    auto rt = ctxt->typeMap->getType(mce, false);
+                    if (rt != nullptr && !rt->is<IR::Type_Void>()) {
+                        isR = true;
+                        auto dest = new IR::Argument(l);
+                        auto args = new IR::Vector<IR::Argument>();
+                        args->push_back(dest);  // dest
+                        for (auto a : *mce->arguments) args->push_back(a);
                         mce2 = new IR::MethodCallExpression(mce->method, mce->typeArguments);
                         mce2->arguments = args;
                         s = new IR::MethodCallStatement(mce);
@@ -215,7 +252,11 @@ void ActionConverter::convertActionBody(const IR::Vector<IR::StatOrDecl> *body,
                 continue;
             } else if (mi->is<P4::ExternFunction>()) {
                 auto ef = mi->to<P4::ExternFunction>();
-                auto json = ExternConverter::cvtExternFunction(ctxt, ef, mc, s, emitExterns);
+                // mce2 carries the destination as argument 0 for the
+                // value-returning case above; it is null for ordinary void
+                // extern functions, which must keep using the original call.
+                auto json = ExternConverter::cvtExternFunction(
+                    ctxt, ef, mce2 != nullptr ? mce2 : mc, s, emitExterns);
                 if (json) result->append(json);
                 continue;
             }

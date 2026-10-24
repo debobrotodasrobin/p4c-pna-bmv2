@@ -816,6 +816,63 @@ Util::IJson *ExpressionConverter::convert(const IR::Expression *e, bool doFixup,
     return result;
 }
 
+//! \return true if \p j, a converted expression in bmv2 JSON form, leaves a
+//! Boolean on the target's expression stack (as opposed to a data value).
+//!
+//! The set of Boolean-producing operators is the one bmv2 itself reports via
+//! ExprOpcodesUtils::get_opcode_type(): the comparisons, the logical operators,
+//! d2b, and the valid-header tests. Everything else that can appear at the top
+//! level of a condition - a field load, a constant, b2d - yields data.
+static bool yieldsBoolean(Util::IJson *j) {
+    if (j == nullptr) return false;
+    auto obj = j->to<Util::JsonObject>();
+    if (obj == nullptr) return false;
+
+    auto getString = [](Util::IJson *member) -> cstring {
+        if (member == nullptr) return nullptr;
+        auto v = member->to<Util::JsonValue>();
+        if (v == nullptr || !v->isString()) return nullptr;
+        return v->getString();
+    };
+
+    auto type = getString(obj->get("type"));
+    if (type == nullptr) return false;
+    // a JSON boolean literal compiles to a LOAD_BOOL
+    if (type == "bool") return true;
+    if (type != "expression") return false;
+
+    auto value = obj->get("value");
+    if (value == nullptr) return false;
+    auto vobj = value->to<Util::JsonObject>();
+    if (vobj == nullptr) return false;
+    auto op = getString(vobj->get("op"));
+    if (op == nullptr) return false;
+
+    return op == "==" || op == "!=" || op == ">" || op == "<" || op == ">=" || op == "<=" ||
+           op == "and" || op == "or" || op == "not" || op == "d2b" || op == "valid" ||
+           op == "union_valid";
+}
+
+Util::IJson *ExpressionConverter::convertCondition(const IR::Expression *e) {
+    auto result = convert(e, /*doFixup=*/true, /*wrap=*/false);
+    if (result == nullptr) return result;
+
+    auto type = typeMap->getType(e, true);
+    if (type == nullptr || !type->is<IR::Type_Boolean>()) return result;
+    if (yieldsBoolean(result)) return result;
+
+    // Boolean in P4, data in bmv2: cast, so that eval_bool() finds the temp it
+    // expects on the bool stack instead of popping an empty one.
+    auto obj = new Util::JsonObject();
+    auto conv = new Util::JsonObject();
+    obj->emplace("type", "expression");
+    obj->emplace("value", conv);
+    conv->emplace("op", "d2b");  // data to Boolean cast
+    conv->emplace("left", Util::JsonValue::null);
+    conv->emplace("right", result);
+    return obj;
+}
+
 Util::IJson *ExpressionConverter::convertLeftValue(const IR::Expression *e) {
     leftValue = true;
     const IR::Expression *expr = e;
