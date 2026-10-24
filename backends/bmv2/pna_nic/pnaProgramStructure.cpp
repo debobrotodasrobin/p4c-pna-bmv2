@@ -158,6 +158,25 @@ bool InspectPnaProgram::preorder(const IR::Declaration_Variable *dv) {
     } else if (ft->is<IR::Type_Boolean>()) {
         LOG5("Adding " << dv << " into scalars map");
         pinfo->scalars.emplace(scalarsName, dv);
+    } else if (ft->is<IR::Type_Header>()) {
+        // The midend synthesizes header-typed temporaries for bound inout
+        // action parameters (e.g. `action a(inout headers_t h, ...)` bound as
+        // `a(hdr)` in the table): each referenced member h.f becomes a
+        // control-level declaration `T h_f;` with copy-in/copy-out assigns.
+        // Those temporaries must be registered as header instances, or the
+        // emitted JSON references a header that was never created and bmv2
+        // rejects the config with "Invalid reference to object of type
+        // 'header'". v1model registers them via HeaderConverter's walk of
+        // structure->variables; the portable PNA path had no equivalent.
+        auto st = ft->to<IR::Type_Header>();
+        addHeaderType(st);
+        addHeaderInstance(st, dv->name);
+    } else if (ft->is<IR::Type_Struct>()) {
+        // Same as above for struct-typed temporaries (metadata copies):
+        // register them as metadata instances so references resolve.
+        auto st = ft->to<IR::Type_Struct>();
+        addHeaderType(st);
+        addHeaderInstance(st, dv->name);
     }
 
     return false;
