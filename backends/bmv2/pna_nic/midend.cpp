@@ -158,6 +158,7 @@ PnaNicMidEnd::PnaNicMidEnd(CompilerOptions &options, std::ostream *outStream)
             new P4::MoveDeclarations(),
             new P4::ValidateTableProperties({"pna_implementation"_cs, "pna_direct_counter"_cs,
                                              "pna_direct_meter"_cs, "pna_idle_timeout"_cs,
+                                             "add_on_miss"_cs,
                                              "size"_cs}),
             new P4::SimplifyControlFlow(&typeMap, true),
             new P4::CompileTimeOperations(),

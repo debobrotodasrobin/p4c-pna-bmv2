@@ -300,6 +300,30 @@ class ControlConverter : public Inspector {
         if (idleTimeoutMode != nullptr)
             result->emplace("pna_idle_timeout", std::string(idleTimeoutMode));
 
+        // PNA's add_on_miss table property declares that a default (miss)
+        // action of this table may call add_entry() to install a new entry on
+        // a lookup miss. It is a capability declaration: the bmv2 add_entry
+        // primitive already implements the spec's miss-only semantics (it is a
+        // no-op on a hit), so this flag is forwarded to the target for
+        // completeness and any future gating, but it does not by itself change
+        // data-path behaviour here.
+        if (auto aom = table->properties->getProperty("add_on_miss")) {
+            auto ev = aom->value->to<IR::ExpressionValue>();
+            if (ev == nullptr) {
+                ::P4::error(ErrorType::ERR_EXPECTED, "%1%: expected a Boolean", aom);
+            } else {
+                auto expr = ev->expression;
+                if (auto b = expr->to<IR::BoolLiteral>()) {
+                    result->emplace("add_on_miss", b->value);
+                } else if (auto c = expr->to<IR::Constant>()) {
+                    result->emplace("add_on_miss", c->value != 0);
+                } else {
+                    ::P4::error(ErrorType::ERR_EXPECTED,
+                                "%1%: add_on_miss must be a compile-time Boolean", aom);
+                }
+            }
+        }
+
         // v1model binds a direct meter through the "meters" table property;
         // PSA and PNA use "psa_direct_meter" / "pna_direct_meter". All three
         // carry the same information (a reference to a DirectMeter instance)
