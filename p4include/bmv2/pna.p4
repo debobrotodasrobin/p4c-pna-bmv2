@@ -706,33 +706,25 @@ extern AddEntryErrorStatus_t add_entry<T>(
     in ExpireTimeProfileId_t expire_time_profile_id);
 // END:add_entry_extern_function
 
-// The following call to add_entry_if():
+// NOTE: add_entry_if() is intentionally NOT declared for this target.
 //
-//     add_entry_if(expr, action_name, action_params, expire_time_profile_id);
+// The PNA specification defines add_entry_if() (and the related
+// set_entry_expire_time_if() and update_expire_info()) as pure sugar for a
+// guarded call to the corresponding base extern, introduced as a work-around
+// for targets that did not support `if` statements inside P4 actions (see
+// https://github.com/p4lang/pna/issues/63).
 //
-// has exactly the same behavior as the following expression:
+// This target now supports `if` statements inside actions natively, so the
+// sugar is unnecessary: write the guarded form directly, e.g.
 //
-//     (expr) ? add_entry(action_name, action_params, expire_time_profile_id)
-//            : ADD_ENTRY_NOT_DONE;
+//     if (expr) {
+//         add_entry(action_name, action_params, expire_time_profile_id);
+//     }
 //
-// and it has the same restrictions on where it can appear in a P4
-// program as that equivalent code.
-//
-// Rationale: At the time PNA was being designed in 2022, there were
-// P4 targets, including the BMv2 software switch in the repository
-// https://github.com/p4lang/behavioral-model, that did not fully
-// support `if` statements within P4 actions.  add_entry_if() enables
-// writing P4 code without `if` statements within P4 actions that
-// would otherwise require an `if` statement to express the desired
-// behavior.  Admittedly, this is a work-around for targets with
-// limited support for `if` statements within P4 actions.  See
-// https://github.com/p4lang/pna/issues/63 for more details.
-
-extern AddEntryErrorStatus_t add_entry_if<T>(
-    in bool do_add_entry,
-    string action_name,
-    in T action_params,
-    in ExpireTimeProfileId_t expire_time_profile_id);
+// Declaring these wrappers here would additionally crash p4c: when used as a
+// statement, RemoveComplexExpressions mis-resolves their method type and the
+// compiler aborts with "unknown type". They were declared upstream but were
+// never functional on this backend.
 
 extern FlowId_t allocate_flow_id();
 
@@ -781,49 +773,18 @@ extern void set_entry_expire_time(
 
 extern void restart_expire_timer();
 
-// The effect of this call:
+// NOTE: update_expire_info() and set_entry_expire_time_if() are intentionally
+// NOT declared for this target, for the same reason as add_entry_if() above:
+// they are pure sugar for a guarded call to set_entry_expire_time() /
+// restart_expire_timer(), and this target supports `if` inside actions. Write
+// the guarded form directly, e.g.
 //
-//     update_expire_info(a, b, c)
+//     if (a) {
+//         if (b) { set_entry_expire_time(c); }
+//         else   { restart_expire_timer(); }
+//     }
 //
-// is exactly the same as the effect of the following code:
-//
-//    if (a) {
-//        if (b) {
-//            set_entry_expire_time(c);
-//        } else {
-//            restart_expire_timer();
-//        }
-//    }
-
-extern void update_expire_info(
-    in bool update_aging_info,
-    in bool update_expire_time,
-    in ExpireTimeProfileId_t expire_time_profile_id);
-
-
-// Set the expire time of the matched entry in the table to the value
-// specified in the parameter expire_time_profile_id, if condition
-// in the first parameter evaluates to true. Otherwise, the function
-// has no effect.
-//
-// @param condition  The boolean expression to evaluate to determine
-//                   if the expire time will be set.
-// @param expire_time_profile_id
-//                   The expire time to set for the matched entry,
-//                   if the data and value parameters are equal.
-//
-// Examples:
-// set_entry_expire_time_if(hdr.tcp.flags == TCP_FLG_SYN &&
-//                          meta.direction == OUTBOUND,
-//                          tcp_connection_start_time_profile_id);
-// set_entry_expire_time_if(hdr.tcp.flags == TCP_FLG_ACK,
-//                          tcp_connection_continuation_time_protile_id);
-// set_entry_expire_time_if(hdr.tcp.flags == TCP_FLG_FIN,
-//                          tcp_connection_close_time_profile_id);
-
-extern void set_entry_expire_time_if(
-    in bool condition,
-    in ExpireTimeProfileId_t expire_time_profile_id);
+//     if (condition) { set_entry_expire_time(expire_time_profile_id); }
 
 
 // SelectByDirection is a simple pure function that behaves exactly as
