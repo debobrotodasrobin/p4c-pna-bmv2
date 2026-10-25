@@ -159,6 +159,12 @@ PnaNicMidEnd::PnaNicMidEnd(CompilerOptions &options, std::ostream *outStream)
             new P4::ValidateTableProperties({"pna_implementation"_cs, "pna_direct_counter"_cs,
                                              "pna_direct_meter"_cs, "pna_idle_timeout"_cs,
                                              "add_on_miss"_cs,
+                                             // pna_empty_group_action is accepted
+                                             // so programs that declare it compile,
+                                             // but this target does not yet invoke
+                                             // it on an empty ActionSelector group
+                                             // (see PNA_REMAINING_GAPS.md).
+                                             "pna_empty_group_action"_cs,
                                              "size"_cs}),
             new P4::SimplifyControlFlow(&typeMap, true),
             new P4::CompileTimeOperations(),
