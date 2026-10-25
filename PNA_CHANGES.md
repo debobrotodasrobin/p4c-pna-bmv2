@@ -123,6 +123,36 @@ as metadata instances, mirroring v1model's `HeaderConverter`.
 
 **Files**: `p4include/bmv2/pna.p4`
 
+### 13. IdleTimeout externs lowering (`add_entry` + `pna_idle_timeout` property)
+
+**Fix**:
+- `control.h` recognises the `pna_idle_timeout` table property and emits
+  `support_timeout: true` plus the mode string (`AUTO_DELETE` /
+  `NOTIFY_CONTROL`) into the bmv2 JSON.
+- `pnaNic.{h,cpp}` add an `ExternConverter` for `add_entry`, which wraps its
+  struct action-parameters argument into a `parameters_vector` for the bmv2
+  primitive. `restart_expire_timer`, `set_entry_expire_time` and
+  `allocate_flow_id` lower through the generic extern-function path.
+
+**Files**: `backends/bmv2/common/control.h`, `backends/bmv2/pna_nic/pnaNic.{h,cpp}`
+
+### 14. Action conditionals (drop Predication from the PNA pipeline)
+
+**Problem**: The PNA midend ran `Predication`, which rewrites action
+conditionals into predicated (mux) assignments and hard-errors on any
+method-call statement inside an `if`. This blocks the IdleTimeout externs that
+DASH conntrack calls under a TCP-flag guard
+(`Conditional execution in actions unsupported on this target`).
+
+**Fix**: Removed `Predication` from `pna_nic/midend.cpp`. bmv2 supports
+conditional execution in actions natively — the shared `ActionConverter` lowers
+`IR::IfStatement` to conditional jumps (this is how v1model, which never runs
+Predication, handles it). The pass is a no-op for programs without action
+conditionals; for those that have them the output changes only from predicated
+muxes to conditional jumps (semantically equivalent, runtime-verified).
+
+**Files**: `backends/bmv2/pna_nic/midend.cpp`
+
 ## DASH (sonic-net/DASH) compatibility
 
 The DASH pipeline (`dash-pipeline/bmv2`, PNA/DPDK variant) now compiles for
@@ -137,10 +167,17 @@ Verified: 116 tables, 176 actions, 84 headers load cleanly on pna_nic; a test
 packet traverses the parser (extracts `u0_ethernet`, `u0_ipv4`), 34 tables,
 and the deparser.
 
-**Not supported in the PNA build**: `-DPNA_CONNTRACK` (uses the `IdleTimeout`
-ageing externs `add_entry`/`set_entry_expire_time` — the one PNA feature not
-implemented, see companion repo docs). DASH's own PNA variant already excludes
-counters, meters and asserts (`dash_arch_specific.p4`).
+**`-DPNA_CONNTRACK` now compiles and loads**: with the IdleTimeout externs
+(feature 13) and action conditionals (feature 14), the conntrack-enabled DASH
+pipeline builds and loads on pna_nic:
+
+```bash
+p4c-bm2-pna -I/usr/local/share/p4c/p4include/bmv2 -I. -o dash_ct.json \
+    -DTARGET_DPDK_PNA -DDISABLE_128BIT_ARITHMETIC -DPNA_CONNTRACK dash_pipeline.p4
+```
+
+DASH's own PNA variant already excludes counters, meters and asserts
+(`dash_arch_specific.p4`).
 
 ## Regression testing
 
@@ -150,8 +187,10 @@ counters, meters and asserts (`dash_arch_specific.p4`).
 | PSA A/B (28 programs) | 0 semantic diffs |
 | PNA A/B (35 programs) | 0 semantic diffs |
 | PNA newly compiling | 4 programs |
-| Feature suites (12) | All pass |
+| PNA A/B after dropping Predication | identical compilable set; 15/17 byte-identical, 2 conditional-representation (runtime-verified) |
+| Feature suites (13, incl. ft_ageing) | All pass |
 | Mininet NIC+fabric demo | 6/6 host pairs |
+| DASH conntrack (`-DPNA_CONNTRACK`) | compiles + loads |
 
 ## Build
 
