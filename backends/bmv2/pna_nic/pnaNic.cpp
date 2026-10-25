@@ -216,6 +216,7 @@ void PnaNicBackend::convert(const IR::ToplevelBlock *tlb) {
 ExternConverter_Hash ExternConverter_Hash::singleton;
 ExternConverter_InternetChecksum ExternConverter_InternetChecksum::singleton;
 ExternConverter_Register ExternConverter_Register::singleton;
+ExternConverter_add_entry ExternConverter_add_entry::singleton;
 
 Util::IJson *ExternConverter_Hash::convertExternObject(UNUSED ConversionContext *ctxt,
                                                        const P4::ExternMethod *em,
@@ -462,6 +463,77 @@ void ExternConverter_Register::convertExternInstance(UNUSED ConversionContext *c
     }
     jreg->emplace("bitwidth"_cs, width);
     ctxt->json->register_arrays->append(jreg);
+}
+
+// add_entry(string action_name, T action_params,
+//           ExpireTimeProfileId_t expire_time_profile_id)
+//
+// Emits the "add_entry" primitive. The only reason this needs a dedicated
+// converter (rather than the generic ExternConverter function path) is the
+// struct argument: bmv2 reads a struct / list primitive argument as a
+// "parameters_vector" object, while the generic expression converter emits a
+// bare JSON array. See the declaration in pnaNic.h.
+//
+// The PNA signature returns AddEntryErrorStatus_t. ActionConverter prepends a
+// destination as argument 0 when that result is consumed, so one argument more
+// than the declared three means the first argument is a write target; it is
+// emitted as a writable reference exactly like the generic value-returning
+// path. The bmv2 primitive itself takes only the three declared arguments (it
+// does not surface the status), so a program that consumes the result is
+// rejected at load time with a parameter-count mismatch rather than silently
+// misbehaving.
+Util::IJson *ExternConverter_add_entry::convertExternFunction(
+    ConversionContext *ctxt, const P4::ExternFunction *ef,
+    const IR::MethodCallExpression *mc, const IR::StatOrDecl *s,
+    UNUSED const bool emitExterns) {
+    auto primitive = mkPrimitive("add_entry"_cs);
+    auto parameters = mkParameters(primitive);
+    primitive->emplace_non_null("source_info"_cs, s->sourceInfoJsonObj());
+
+    const auto &args = mc->arguments;
+    const size_t declared = ef->method->getParameters()->size();  // 3
+    const bool destIsArg0 = args->size() == declared + 1;
+    const size_t base = destIsArg0 ? 1 : 0;
+    if (args->size() != declared && !destIsArg0) {
+        modelError("%1%: expected 3 arguments for add_entry", mc);
+        return primitive;
+    }
+
+    size_t i = 0;
+    if (destIsArg0) {
+        parameters->append(ctxt->conv->convertLeftValue(args->at(i)->expression));
+        ++i;
+    }
+
+    // action_name: a compile-time string literal, forwarded as a string param.
+    parameters->append(ctxt->conv->convert(args->at(i)->expression));
+    ++i;
+
+    // action_params: a struct (or list) packed into a parameters_vector. An
+    // empty struct yields an empty vector, which is what DASH's add_entry()
+    // calls pass.
+    auto pv = new Util::JsonObject();
+    pv->emplace("type", "parameters_vector");
+    auto arr = new Util::JsonArray();
+    auto structArg = args->at(i)->expression;
+    if (auto se = structArg->to<IR::StructExpression>()) {
+        for (auto comp : se->components)
+            arr->append(ctxt->conv->convert(comp->expression, false, true, true));
+    } else if (auto le = structArg->to<IR::ListExpression>()) {
+        for (auto e : le->components)
+            arr->append(ctxt->conv->convert(e, false, true, true));
+    } else if (!structArg->is<IR::StructExpression>()) {
+        // A single scalar bound to the struct parameter: treat as one element.
+        arr->append(ctxt->conv->convert(structArg, false, true, true));
+    }
+    pv->emplace("value"_cs, arr);
+    parameters->append(pv);
+    ++i;
+
+    // expire_time_profile_id: a scalar.
+    parameters->append(ctxt->conv->convert(args->at(i)->expression));
+
+    return primitive;
 }
 
 }  // namespace P4::BMV2

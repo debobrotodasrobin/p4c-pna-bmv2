@@ -138,6 +138,18 @@ EXTERN_CONVERTER_W_OBJECT_AND_INSTANCE(Hash)
 EXTERN_CONVERTER_W_OBJECT_AND_INSTANCE(InternetChecksum)
 EXTERN_CONVERTER_W_OBJECT_AND_INSTANCE(Register)
 
+// PNA add_entry(string action_name, T action_params,
+//               ExpireTimeProfileId_t expire_time_profile_id).
+//
+// Needs a dedicated converter only because its second argument is a struct:
+// the generic expression converter lowers a struct to a bare JSON array, but
+// bmv2 expects a "parameters_vector" object so the data-path primitive can
+// read it as a std::vector<Data>. The other three IdleTimeout externs
+// (allocate_flow_id, set_entry_expire_time, restart_expire_timer) take only
+// scalar arguments and are handled by the generic ExternConverter function
+// path, so they need no converter here.
+EXTERN_CONVERTER_W_FUNCTION(add_entry)
+
 }  // namespace P4::BMV2
 
 #endif /* BACKENDS_BMV2_PNA_NIC_PNANIC_H_ */

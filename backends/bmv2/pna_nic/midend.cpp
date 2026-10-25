@@ -142,7 +142,14 @@ PnaNicMidEnd::PnaNicMidEnd(CompilerOptions &options, std::ostream *outStream)
             new P4::FlattenHeaders(&typeMap),
             new P4::FlattenInterfaceStructs(&typeMap),
             new P4::ReplaceSelectRange(),
-            new P4::Predication(),
+            // Predication rewrites action conditionals into predicated (mux)
+            // assignments and hard-errors on any method-call statement inside an
+            // if (e.g. the PNA IdleTimeout externs add_entry / set_entry_expire_time
+            // that DASH conntrack calls under a TCP-flag guard). bmv2 supports
+            // conditional execution in actions natively: the shared ActionConverter
+            // lowers IR::IfStatement to conditional jumps (this is how v1model,
+            // which never runs Predication, handles it). So the pass is unnecessary
+            // here and only blocks valid programs.
             new P4::MoveDeclarations(),  // more may have been introduced
             new P4::ConstantFolding(&typeMap),
             new P4::LocalCopyPropagation(&typeMap, nullptr, policy),

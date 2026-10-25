@@ -260,7 +260,45 @@ class ControlConverter : public Inspector {
                 ::P4::error(ErrorType::ERR_EXPECTED, "%1%: expected a Boolean", timeout);
             }
         }
+
+        // PNA binds table ageing through the "pna_idle_timeout" property, an
+        // enum (PNA_IdleTimeout_t) with values NO_TIMEOUT / NOTIFY_CONTROL /
+        // AUTO_DELETE. Any value other than NO_TIMEOUT enables ageing and
+        // selects what the bmv2 ageing monitor does on expiry. The mode is
+        // forwarded to bmv2 as a string; bmv2 also treats its presence as
+        // implying support_timeout, but we set that here too for clarity.
+        cstring idleTimeoutMode;  // null == NO_TIMEOUT / absent
+        auto idle = table->properties->getProperty("pna_idle_timeout");
+        if (idle != nullptr) {
+            auto ev = idle->value->to<IR::ExpressionValue>();
+            if (ev == nullptr) {
+                ::P4::error(ErrorType::ERR_EXPECTED, "%1%: expected an enum value", idle);
+            } else {
+                auto expr = ev->expression;
+                if (auto m = expr->to<IR::Member>()) {
+                    idleTimeoutMode = m->member.name;
+                } else if (auto c = expr->to<IR::Constant>()) {
+                    // folded to the enum's underlying value: 0/1/2 in decl order
+                    int v = static_cast<int>(c->value);
+                    idleTimeoutMode = cstring((v == 2) ? "AUTO_DELETE"
+                                         : (v == 1) ? "NOTIFY_CONTROL" : "NO_TIMEOUT");
+                } else {
+                    ::P4::error(ErrorType::ERR_EXPECTED,
+                                "%1%: pna_idle_timeout must be a PNA_IdleTimeout_t value", idle);
+                }
+                if (idleTimeoutMode != "NO_TIMEOUT" && idleTimeoutMode != "NOTIFY_CONTROL"
+                    && idleTimeoutMode != "AUTO_DELETE") {
+                    ::P4::error(ErrorType::ERR_INVALID,
+                                "%1%: unknown pna_idle_timeout value '%2%'", idle, idleTimeoutMode);
+                    idleTimeoutMode = cstring();
+                }
+            }
+        }
+        if (idleTimeoutMode == "NO_TIMEOUT") idleTimeoutMode = cstring();  // NO_TIMEOUT == absent
+        if (idleTimeoutMode != nullptr) sup_to = true;
         result->emplace("support_timeout", sup_to);
+        if (idleTimeoutMode != nullptr)
+            result->emplace("pna_idle_timeout", std::string(idleTimeoutMode));
 
         // v1model binds a direct meter through the "meters" table property;
         // PSA and PNA use "psa_direct_meter" / "pna_direct_meter". All three
